@@ -362,6 +362,7 @@ Planned improvements, in rough priority order:
 ## 11. Author and License
 
 **Author:** Jiacheng Zheng
+
 **Contact / homepage:** <https://karcen.github.io/zhengjiacheng.github.io/>
 
 This tool was built to support IPCC-related bibliometric research.
