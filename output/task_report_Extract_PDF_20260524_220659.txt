@@ -1,0 +1,26 @@
+
+====================================================================
+  Task Report — Extract PDF
+====================================================================
+  Status        : completed
+  Elapsed time  : 2.1s
+  Total items   : 1421
+  Succeeded     : 1421
+  Success rate  : 100.0%
+  ------------------------------------------------------
+  PDF               : /Users/karcenzheng/Downloads/Jiacheng_Zheng_IPCC_Work/ipcc_sar_wg_I_full_report.pdf
+  Report            : AR6 / WG2
+  PDF pages         : 588
+  Chapters detected : 1
+  Chapters succeeded: 1
+  Chapters failed   : 0
+  Embedded DOIs     : 0
+  Crossref matches  : 1421
+  Unmatched         : 0
+  Unique DOIs       : 1261
+  DOI coverage      : 100.0%
+  ------------------------------------------------------
+  Output files       :
+      - /Users/karcenzheng/Downloads/Jiacheng_Zheng_IPCC_Work/output/references.xlsx
+      - /Users/karcenzheng/Downloads/Jiacheng_Zheng_IPCC_Work/output/wos_queries.txt
+====================================================================
