@@ -442,6 +442,7 @@ converter，便于事后审计。已知质量差的 PDF，可以先 `ocrmypdf` �
 ## 12. 作者与许可
 
 **作者：** Jiacheng Zheng
+
 **联系 / 主页：** <https://karcen.github.io/zhengjiacheng.github.io/>
 
 为支撑 IPCC 相关文献计量研究而构建。Bug、PR、反馈都欢迎，通过上面的
