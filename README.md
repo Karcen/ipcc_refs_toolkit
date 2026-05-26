@@ -1,374 +1,484 @@
 # IPCC References Toolkit
 
-A reproducible desktop pipeline that turns large IPCC report PDFs into a
-Web of Science (WoS) indexed reference database, with a Tkinter GUI for
-non-technical users and full error handling for unattended runs.
+End-to-end research pipeline that turns large IPCC report PDFs into a
+literature-scale, LLM-analysable bibliometric database — from raw PDF
+reference extraction, through Web of Science enrichment, OA full-text
+acquisition, Markdown conversion, schema-driven LLM extraction, and
+finally a publishable HTML analysis report.
+
+> 中文版 README: see [`README_zh.md`](./README_zh.md)
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [Workflow](#2-workflow)
-3. [Features](#3-features)
-4. [Installation](#4-installation)
-5. [Using the GUI](#5-using-the-gui)
-6. [API Configuration (Web of Science)](#6-api-configuration-web-of-science)
-7. [Output Files Reference](#7-output-files-reference)
-8. [Common Errors and Fixes](#8-common-errors-and-fixes)
-9. [Known Limitations](#9-known-limitations)
-10. [Roadmap](#10-roadmap)
-11. [Author and License](#11-author-and-license)
+2. [Pipeline Architecture](#2-pipeline-architecture)
+3. [Stages 1–3: PDF → references → WoS → Merge](#3-stages-13-pdf--references--wos--merge)
+4. [Stages 4–7: PDF acquisition → Markdown → LLM extraction → Analysis](#4-stages-47-pdf-acquisition--markdown--llm-extraction--analysis)
+5. [Installation](#5-installation)
+6. [Quick Start](#6-quick-start)
+7. [API Configuration](#7-api-configuration)
+8. [Output Files Reference](#8-output-files-reference)
+9. [Legal and Ethical Notes](#9-legal-and-ethical-notes)
+10. [Known Limitations](#10-known-limitations)
+11. [Roadmap](#11-roadmap)
+12. [Author and License](#12-author-and-license)
 
 ---
 
 ## 1. Project Overview
 
 IPCC Assessment Reports cite tens of thousands of papers across dozens of
-chapters and three Working Groups. Compiling a clean, citation-indexed
-database of those references by hand is impractical. This toolkit
-automates the full pipeline end-to-end:
+chapters and three Working Groups. Existing bibliometric tools only see
+the metadata layer — citation counts, co-authorship networks. Questions
+like *"What fraction of papers cited in AR6 WG2 actually used MRIO methods
+on EORA data?"* or *"How does the policy framing of climate adaptation
+literature shift between AR5 and AR6?"* require reading the full text,
+which is impractical at the ten-thousand-paper scale by hand.
+
+This toolkit automates the entire workflow end-to-end:
 
 ```
-   IPCC PDF  ──►  references.xlsx  ──►  WoS lookup  ──►  Record.csv  +  Unrecord.csv
+   IPCC PDF
+      │
+      ▼
+   [1] Extract references             ──►  references.xlsx, wos_queries.txt
+      │
+      ▼
+   [2] WoS lookup (API or browser)    ──►  wos_exports/
+      │
+      ▼
+   [3] Merge                          ──►  Record.csv, Unrecord.csv
+      │
+      ▼
+   [4] OA PDF acquisition             ──►  pdfs/, pdf_index.csv
+      │
+      ▼
+   [5] PDF → Markdown                 ──►  markdown/, markdown_index.csv
+      │
+      ▼
+   [6] LLM structured extraction      ──►  extracted/*.json
+      │
+      ▼
+   [7] Bibliometric analysis          ──►  analysis_report.html, .xlsx, figures/
 ```
 
-Stage 1 (PDF → references.xlsx) is **fully local and requires no API**.
-Stages 2 and 3 add Web of Science metadata when access is available, and
-degrade gracefully when it is not.
+Stages 1–3 are local-or-API; Stage 4 uses **only OA / preprint sources**
+(Unpaywall, Crossref, OpenAlex, arXiv) — no paywall circumvention; Stage 5
+uses Microsoft MarkItDown with fallbacks; Stage 6 uses the Claude API; and
+Stage 7 produces a single self-contained HTML report.
 
-Designed for: researchers and students working on IPCC-related
-bibliometric analyses, citation-based emission accounting, or any project
-that needs a structured WoS-indexed database derived from large PDF
-reports.
+**Designed for:** researchers, PhD students, and bibliometricians working on
+IPCC-related analyses, consumption-based emission accounting, climate
+adaptation literature reviews, or any project that needs a structured,
+WoS-indexed, LLM-enriched corpus from large PDF reports.
 
 ---
 
-## 2. Workflow
+## 2. Pipeline Architecture
 
-| Stage | Input | Tool | Output | Needs API? |
-|------:|-------|------|--------|:----------:|
-| 1 | IPCC PDF | PDF parser + Crossref | `references.xlsx`, `wos_queries.txt` | No (Crossref is free) |
-| 2 | `wos_queries.txt` | WoS Starter API *or* Playwright browser | `wos_*.xlsx` / `wos_*.json` | Recommended |
+| Stage | Input | Tool | Output | API needed? |
+|------:|-------|------|--------|:-----------:|
+| 1 | IPCC PDF | PyMuPDF + Crossref | `references.xlsx`, `wos_queries.txt` | No (Crossref is free) |
+| 2 | `wos_queries.txt` | WoS Starter API *or* Playwright | `wos_*.xlsx` / `wos_*.json` | WoS recommended |
 | 3 | `references.xlsx` + WoS exports | Merger | `Record.csv`, `Unrecord.csv` | No |
+| 4 | `Record.csv` | Unpaywall + Crossref + OpenAlex + arXiv | `pdfs/`, `pdf_index.csv` | No (free APIs) |
+| 5 | `pdfs/` | MarkItDown → pymupdf4llm → pymupdf | `markdown/`, `markdown_index.csv` | No |
+| 6 | `markdown/` | Claude API (Sonnet 4.6 default) | `extracted/*.json` | **Anthropic key required** |
+| 7 | `Record.csv` + `extracted/` | pandas + matplotlib | `analysis_report.html`, `analysis_tables.xlsx` | No |
 
-Each stage is a tab in the GUI. Each tab runs independently in its own
-background thread with Pause / Resume / Stop controls, a live log, and a
-progress bar. Every run produces a `task_report_*.txt` file summarising
-status, elapsed time, success rate, outputs, and any errors.
+**Architectural guarantees** (apply to all 7 stages):
 
----
-
-## 3. Features
-
-**Reliability and resilience**
-
-- **Per-chapter failure isolation in Stage 1**: a single broken chapter
-  no longer aborts the run. Failed chapters are written to
-  `failed_chapters.csv` and `extraction_errors.log` with full Python
-  tracebacks, while the rest of the PDF continues to be processed.
-- **Structured `TaskReport` for every run**: status, elapsed time, total
-  items, success / failure / skipped counts, success rate, outputs,
-  failed extractions with tracebacks, and warnings — all captured in
-  memory and persisted to a `task_report_*.txt` file in the output
-  directory.
-- **Never-raise runners**: the three stage functions
-  (`run_extraction`, `run_wos_auto` / `run_wos_api`, `run_merge`) are
-  designed so that even catastrophic failures return a populated
-  `TaskReport` with `status="failed"` rather than crashing the GUI.
-- **Crossref disk cache** (`crossref_cache.json`): re-runs are free
-  and fast.
-
-**User experience**
-
-- Single-window Tkinter GUI with four tabs.
-- Pause / Resume / Stop for every long-running task.
-- Live log + progress bar per tab.
-- Compact footer with author credit and a clickable contact link.
-- Result popup on completion with success summary or warning.
-
-**WoS integration (two paths)**
-
-- **API path** (recommended): direct HTTPS calls to the WoS Starter API
-  using your `X-ApiKey`. No browser needed, ToS-compliant, scriptable,
-  unattended.
-- **Browser path** (fallback): Playwright drives a real Chromium window
-  with a persistent profile; you log in once via your institution's
-  SSO and the toolkit walks every DOI batch and downloads each
-  Excel export. Useful when no API access is available.
+- **Per-item failure isolation.** A single broken PDF, failed download, or
+  unparseable LLM response never aborts the run. Failures are caught,
+  logged with full traceback, and processing continues.
+- **Never-raise runners.** Each stage's entry function (`run_extraction`,
+  `run_acquire_pdfs`, `run_llm_extract`, …) is contractually guaranteed to
+  return a `TaskReport` rather than raise — even on catastrophic errors.
+  This makes the pipeline scriptable and safe to wrap in any orchestrator.
+- **Resumable.** Stages 4–6 maintain on-disk indexes; re-running skips
+  work already done. Pass `--no-resume` to force a clean rerun.
+- **Structured reports.** Every run produces a `task_report_*.txt` file
+  with status, elapsed time, success rate, outputs, and per-item failures.
 
 ---
 
-## 4. Installation
+## 3. Stages 1–3: PDF → references → WoS → Merge
 
-Tested on macOS, Linux, and Windows with Python 3.9 – 3.12.
-
-```bash
-# 1. Clone or download the project, then:
-cd ipcc_refs_toolkit
-
-# 2. (Recommended) create a virtual environment
-python -m venv .venv
-source .venv/bin/activate          # macOS / Linux
-.venv\Scripts\activate             # Windows
-
-# 3. Install Python dependencies
-pip install -r requirements.txt
-
-# 4. (Optional, only if you plan to use the browser path)
-playwright install chromium
-```
-
-`requirements.txt` pulls in PyMuPDF (`pymupdf`), `pandas`, `openpyxl`,
-`requests`, and `playwright`. PyMuPDF wheels are pre-built for all
-common platforms.
-
-**Tkinter** ships with most Python distributions on macOS and Windows.
-On some Linux distributions you may need to install it separately:
-
-```bash
-# Ubuntu / Debian
-sudo apt install python3-tk
-```
-
-Launch the GUI:
+Implemented in [`ipcc_refs_gui.py`](./ipcc_refs_gui.py) as a four-tab
+Tkinter GUI. Run with:
 
 ```bash
 python ipcc_refs_gui.py
 ```
 
----
-
-## 5. Using the GUI
-
 ### Tab 1 — Extract PDF
 
 1. Pick your IPCC PDF.
 2. Fill in `Report` (e.g. `AR6`), `Working Group` (e.g. `WG2`), and an
-   email address (used in the Crossref polite-pool User-Agent, never
-   stored or transmitted elsewhere).
-3. Choose an output folder.
-4. (Optional) `Max refs per chapter` — set to a small number (e.g. 5)
-   for a quick first pass, `0` for all.
-5. (Optional) `Chapters` — comma-separated chapter numbers to limit
-   the run (e.g. `3,5,7`).
-6. (Optional) `Skip Crossref` — extract raw references only, no DOI
-   resolution. Useful for a very fast preview pass.
-7. Click **Run**. Progress is shown in the bar and the log streams in
-   real time. Use **Pause** to pause at the next safe point,
-   **Resume** to continue, or **Stop** to abort and keep already-written
-   outputs.
-
-**On completion**: a popup summarises the run; a `task_report_*.txt`
-file is written to the output folder. If any chapter failed,
-`failed_chapters.csv` and `extraction_errors.log` are also written,
-and the popup will be a yellow warning rather than a green success.
+   email (used in the Crossref polite-pool User-Agent only).
+3. Click **Run**. Progress is shown in the bar; the log streams live.
+4. On completion, the GUI pops up a structured summary. Outputs:
+   `references.xlsx`, `wos_queries.txt`, `crossref_cache.json`, and (if
+   any chapter failed) `failed_chapters.csv` + `extraction_errors.log`.
 
 ### Tab 2 — WOS Lookup
 
-The most important field on this tab is the **WOS API key** input, which
-is highlighted in **red** because it is the recommended path.
+The toolkit supports two paths, controlled by the **WOS API key** field
+(highlighted in red because the API path is strongly preferred):
 
-- If you paste a valid Starter API key, the toolkit uses HTTPS calls to
-  the WoS Starter endpoint and writes one JSON file per batch plus a
-  combined `wos_api_combined.xlsx`.
-- If the API key field is empty, the toolkit falls back to Playwright
-  browser automation. A real Chromium window opens; complete login in
-  the browser, then click **Continue after login** in the GUI. The
-  toolkit will then walk every DO=(...) batch and download an Excel
-  export per batch.
-
-See [§6 API Configuration](#6-api-configuration-web-of-science) for how
-to obtain a key.
+- **API path** (paste your Starter key in the red field): direct HTTPS
+  calls to `api.clarivate.com/apis/wos-starter`. Fast, ToS-compliant,
+  scriptable, unattended.
+- **Browser path** (leave the key empty): Playwright drives a Chromium
+  window with a persistent profile. You log in once via your
+  institution's SSO; the toolkit walks every batch and downloads each
+  Excel export. Requires the machine to stay on for the entire run.
 
 ### Tab 3 — Merge
 
-1. Point at `references.xlsx` (from Stage 1).
-2. Point at the folder containing WoS exports (xlsx, xls, or
-   tab-delimited txt — the loader auto-detects).
-3. Click **Run**.
+Combines `references.xlsx` with the WoS exports folder into:
 
-Outputs are `Record.csv` (full WoS schema, deduplicated by DOI) and
-`Unrecord.csv` (eight-column slim schema of references not found in any
-WoS export). Re-running is safe and idempotent — just drop more
-exports into the folder and click Run again.
+- **`Record.csv`** — the full WoS schema (≈70 columns), one row per
+  reference successfully found in WoS, deduplicated by normalised DOI.
+- **`Unrecord.csv`** — slim 8-column schema (Report, WG, Chapter,
+  Chapter title, Authors, Article Title, Publisher, Year) for
+  references still missing from WoS.
 
-### Tab 4 — Help
-
-A concise in-app summary of the above.
+Re-running is safe and idempotent — drop more WoS exports into the
+folder and click Run again.
 
 ---
 
-## 6. API Configuration (Web of Science)
+## 4. Stages 4–7: PDF acquisition → Markdown → LLM extraction → Analysis
 
-The toolkit supports the **WoS Starter API** out of the box.
+Implemented in [`pipeline_extras.py`](./pipeline_extras.py) as a CLI
+script with four subcommands plus an `all` shortcut. CLI-first because
+these stages are typically long-running batch jobs that benefit from
+running on a server / under `nohup` / in CI.
+
+### Stage 4 — `acquire`: download Open Access PDFs
+
+For each DOI in `Record.csv`, query four free sources in priority order
+and download the first PDF that resolves:
+
+1. **Unpaywall API** — purpose-built OA index; requires your email.
+2. **Crossref `link` field** — direct publisher PDF URLs flagged as
+   text-mining-friendly.
+3. **OpenAlex** — aggregates OA locations from many sources.
+4. **arXiv** — preprint coverage (significant for IPCC-cited literature).
+
+Each downloaded file is verified by magic bytes (`%PDF`) to catch HTML
+error pages disguised as PDFs. A 100 MB safety cap is enforced per file.
+
+```bash
+python pipeline_extras.py acquire \
+    --records output/Record.csv \
+    --out output/stage4_pdfs \
+    --email you@your-institution.edu
+```
+
+Outputs: `pdfs/<doi_safe>.pdf` + `pdf_index.csv` (with per-record
+`status`, `source`, `url`, `pdf_path`, `error`).
+
+Expected OA coverage for climate/environment IPCC references: roughly
+40–60% in our tests.
+
+### Stage 5 — `markdown`: PDF → Markdown
+
+Tries Microsoft MarkItDown first, then `pymupdf4llm`, then plain
+PyMuPDF text extraction. Each file's converter is recorded so you can
+audit conversion quality afterwards.
+
+```bash
+python pipeline_extras.py markdown \
+    --pdfs output/stage4_pdfs \
+    --out output/stage5_markdown \
+    --converter markitdown        # or: pymupdf4llm, pymupdf
+```
+
+Outputs: `markdown/<doi_safe>.md` + `markdown_index.csv`.
+
+### Stage 6 — `extract`: schema-driven LLM extraction
+
+For each markdown file, ask Claude to produce a JSON object matching a
+fixed schema:
+
+```json
+{
+  "research_question": "...",
+  "field": "...",
+  "methods": ["..."],
+  "data_sources": ["..."],
+  "geographic_scope": "...",
+  "time_period": "...",
+  "key_findings": [
+    {"finding": "...", "evidence_quote": "...", "is_quantitative": true}
+  ],
+  "stated_uncertainty": "...",
+  "policy_relevance": "...",
+  "limitations": ["..."],
+  "ipcc_relevance_tags": ["..."]
+}
+```
+
+Each finding must include an `evidence_quote` — a verbatim substring of
+the source. This is the auditability anchor: spot-checking a random
+sample tells you whether the model is hallucinating.
+
+```bash
+# Either pass --api-key, or set ANTHROPIC_API_KEY in your environment
+export ANTHROPIC_API_KEY=sk-ant-...
+
+python pipeline_extras.py extract \
+    --markdown output/stage5_markdown \
+    --out output/stage6_extracted \
+    --model claude-sonnet-4-6     \
+    --max-papers 20               # test on 20 first; remove for full run
+```
+
+Outputs: `extracted/<doi_safe>.json` + `extracted_index.csv`. Skipping
+already-extracted files is automatic.
+
+**Cost note.** A 30-page paper is roughly 30–50k tokens of input plus
+≤4k output. At Sonnet 4.6 list pricing, a corpus of 10,000 papers
+typically costs in the low four figures (USD); run on 20 papers first
+to dial in the prompt and schema.
+
+### Stage 7 — `analyze`: bibliometric analysis + HTML report
+
+Joins WoS metadata (from `Record.csv`) with LLM-derived dimensions
+(from `extracted/*.json`) to produce:
+
+```bash
+python pipeline_extras.py analyze \
+    --records output/Record.csv \
+    --extracted output/stage6_extracted \
+    --out output/stage7_analysis
+```
+
+Outputs:
+
+- `analysis_report.html` — single-file report with embedded charts
+  covering:
+    - Standard bibliometrics: papers per year, top journals, top authors.
+    - LLM-derived dimensions: methods used, data sources cited, geographic
+      scope, IPCC topic tags, stated limitations.
+- `analysis_tables.xlsx` — raw counts in pivot tables for further work.
+- `figures/` — individual PNGs for inclusion in papers / presentations.
+
+### Run the full pipeline end-to-end
+
+```bash
+python pipeline_extras.py all \
+    --records output/Record.csv \
+    --out output/full_pipeline \
+    --email you@your-institution.edu \
+    --max-papers 10           # try 10 first, then remove
+```
+
+---
+
+## 5. Installation
+
+Tested on macOS, Linux, and Windows with Python 3.9 – 3.12.
+
+```bash
+# 1. Clone
+git clone https://github.com/<your-account>/ipcc-refs-toolkit.git
+cd ipcc-refs-toolkit
+
+# 2. (Recommended) virtual environment
+python -m venv .venv
+source .venv/bin/activate          # macOS / Linux
+.venv\Scripts\activate             # Windows
+
+# 3. Install
+pip install -r requirements.txt
+
+# 4. (Optional) browser fallback for Stage 2
+playwright install chromium
+
+# 5. (Optional, Linux only) Tkinter
+sudo apt install python3-tk        # Ubuntu / Debian
+```
+
+The optional packages (`markitdown`, `pymupdf4llm`) gracefully degrade
+to the plain PyMuPDF fallback if not installed; the pipeline will still
+work but with lower-quality markdown output.
+
+---
+
+## 6. Quick Start
+
+For a complete first run on a small sample:
+
+```bash
+# Stage 1-3: GUI
+python ipcc_refs_gui.py
+# - Tab 1: pick a small IPCC chapter PDF, set Max refs per chapter = 10
+# - Tab 2: paste your WoS API key (or use browser path)
+# - Tab 3: click Run
+
+# Stages 4-7: CLI
+python pipeline_extras.py all \
+    --records output/Record.csv \
+    --out output/full \
+    --email you@example.com \
+    --max-papers 5
+```
+
+Then open `output/full/stage7_analysis/analysis_report.html` in your
+browser to see the report.
+
+---
+
+## 7. API Configuration
+
+### Web of Science Starter API (for Stage 2)
 
 - Endpoint: `https://api.clarivate.com/apis/wos-starter/v1/documents`
-- Auth header: `X-ApiKey: <your_key>`
 - Documentation: <https://developer.clarivate.com/apis/wos-starter>
+- **Where to paste:** GUI Tab 2 → red field labelled *"WOS API key
+  (★ RECOMMENDED ★)"*.
+- Many universities have access included in their WoS subscription —
+  ask your library before paying for a personal plan.
 
-**How to obtain a key**
+### Anthropic Claude API (for Stage 6)
 
-1. Sign in at <https://developer.clarivate.com/>.
-2. Subscribe to *Web of Science Starter API*. Many universities and
-   research institutes already have access included in their WoS
-   subscription — check with your library before paying for a personal
-   plan.
-3. Copy the key from your developer dashboard.
+- Endpoint: `https://api.anthropic.com/v1/messages`
+- Get a key: <https://console.anthropic.com>
+- **Where to pass it:** either `--api-key sk-ant-...` on the command
+  line, or `export ANTHROPIC_API_KEY=sk-ant-...` in your shell.
+- Default model: `claude-sonnet-4-6` (good balance of cost and quality
+  for structured extraction). Override with `--model`.
+- The toolkit uses the official `anthropic` Python SDK if installed,
+  otherwise falls back to direct HTTPS — both paths work.
 
-**Where to paste it**
+### Unpaywall (for Stage 4)
 
-In the GUI: Tab 2 → red field labelled **"WOS API key (★ RECOMMENDED ★)"**.
-
-The key is held in memory only for the lifetime of the GUI process; it
-is never written to disk by the toolkit. If you need persistent
-configuration, prefix the launch with an environment variable and add a
-one-line read in `IpccToolkitGui.__init__`.
-
-**Rate limiting and retries**
-
-The toolkit issues one Starter query per DOI batch (50 DOIs each),
-waits one second between batches, and on HTTP 429 (rate-limited) sleeps
-30 s and retries once. Failures are recorded in the `TaskReport`
-without aborting the run.
-
-**Field coverage**
-
-Starter returns a smaller field set than the official WoS Excel export
-(no `Cited References`, no funding metadata, limited address parsing).
-For a study that needs the full schema, use the browser path or
-upgrade to the WoS Expanded API and adapt `_wos_api_to_row()`.
+- No key needed; just an email address (the "polite pool").
+- Pass `--email you@your-institution.edu` to `acquire`.
 
 ---
 
-## 7. Output Files Reference
+## 8. Output Files Reference
 
-All files are written to the output folder you choose on each tab.
-
-### Stage 1 (Extract PDF)
-
-| File | Description |
-|------|-------------|
-| `references.xlsx` | One row per reference. 15-column schema (Report, WG, Chapter, Chapter Title, Authors, Article Title, Publisher, Year, Source Title, Raw Citation, DOI (Extracted), DOI Source, Crossref Score, Match Status). |
-| `wos_queries.txt` | DOI batches in WoS Advanced Search syntax: `DO=("10.x/y" OR "10.x/z" OR ...)`, 50 DOIs per batch. Used as input to Stage 2. |
-| `crossref_cache.json` | On-disk cache of Crossref responses. Safe to delete; will be rebuilt on the next run. |
-| `task_report_Extract_PDF_*.txt` | Structured summary of the run. |
-| `failed_chapters.csv` | (Only if any chapter failed.) One row per failed chapter with columns `chapter`, `title`, `error`, `traceback`. |
-| `extraction_errors.log` | (Only if any chapter failed.) Human-readable per-chapter error report with full tracebacks. |
-
-### Stage 2 (WOS Lookup)
-
-API path:
-
-| File | Description |
-|------|-------------|
-| `wos_api_batch_NNN.json` | Raw JSON response per batch. |
-| `wos_api_combined.xlsx` | Flattened, deduplicated records across all batches. |
-| `task_report_WOS_API_Starter_*.txt` | Run summary. |
-
-Browser path:
-
-| File | Description |
-|------|-------------|
-| `wos_batch_NNN.xlsx` | One file per batch. |
-| `wos_batch_NNN.empty` | Marker for batches that returned zero results (so subsequent runs skip them). |
-| `error_batch_NNN.png` | Page screenshot if a batch failed (for debugging UI changes). |
-| `task_report_WOS_Auto_Browser_*.txt` | Run summary. |
-
-### Stage 3 (Merge)
-
-| File | Description |
-|------|-------------|
-| `Record.csv` | Full WoS schema (≈70 columns), one row per reference successfully found in WoS, deduplicated by normalised DOI. |
-| `Unrecord.csv` | Slim 8-column schema (Report, Working Group, Chapter, Chapter title, Authors, Article Title, Publisher, Year) for references still missing from WoS. |
-| `task_report_Merge_WOS_*.txt` | Run summary. |
+| Stage | File | Description |
+|------:|------|-------------|
+| 1 | `references.xlsx` | One row per extracted reference; 15-column schema. |
+| 1 | `wos_queries.txt` | DOI batches as WoS Advanced Search queries (50/batch). |
+| 1 | `crossref_cache.json` | On-disk cache; safe to delete. |
+| 1 | `failed_chapters.csv` *(only on failure)* | Per-chapter failures with error + traceback. |
+| 1 | `extraction_errors.log` *(only on failure)* | Human-readable per-chapter tracebacks. |
+| 2 | `wos_api_batch_NNN.json` | Raw WoS API responses. |
+| 2 | `wos_api_combined.xlsx` | Flattened, deduplicated combined records. |
+| 2 | `wos_batch_NNN.xlsx` | Browser path: one Excel per DOI batch. |
+| 3 | `Record.csv` | Full WoS schema (~70 columns) for matched references. |
+| 3 | `Unrecord.csv` | Slim 8-column schema for unmatched references. |
+| 4 | `pdfs/<doi_safe>.pdf` | Downloaded OA PDFs. |
+| 4 | `pdf_index.csv` | Per-record status / source / URL / error. |
+| 5 | `markdown/<doi_safe>.md` | Markdown-converted text. |
+| 5 | `markdown_index.csv` | Per-file converter used + character count. |
+| 6 | `extracted/<doi_safe>.json` | Structured LLM extraction. |
+| 6 | `extracted_index.csv` | Per-paper extraction status. |
+| 7 | `analysis_report.html` | Self-contained HTML report with charts. |
+| 7 | `analysis_tables.xlsx` | Raw count tables (multiple sheets). |
+| 7 | `figures/*.png` | Individual chart PNGs. |
+| *all* | `task_report_*.txt` | Per-run structured summary. |
+| *all* | `failed_items_*.csv` | Per-run failed-item details with tracebacks. |
 
 ---
 
-## 8. Common Errors and Fixes
+## 9. Legal and Ethical Notes
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `Cannot open PDF` | Corrupt or DRM-locked file | Re-download from the official IPCC site; if it is a scan, run `ocrmypdf input.pdf output.pdf` first. |
-| `Chapter detection failed; using single-chapter fallback` | PDF has no usable TOC bookmarks | The toolkit will still extract references, but every ref will be assigned to a synthetic "Chapter 1". Manually edit the Chapter column afterwards if needed. |
-| `WARNING — no References section detected` for some chapter | The chapter's References heading is non-standard | The chapter is recorded as zero references but does not stop the run. Inspect the PDF and consider extending `REFERENCES_HEADER_RE` in `ipcc_refs_gui.py`. |
-| `Playwright not installed` on Stage 2 (browser path) | Missing browser binaries | `pip install playwright && playwright install chromium`. |
-| `Advanced Search textarea not found` | WoS UI has changed | The toolkit tries multiple selector strategies and falls back through them. If all fail, screenshots are saved as `error_batch_NNN.png` for debugging. Update the selector list in `_wos_search_one`. |
-| `401 unauthorized` from the API | Wrong, expired, or unsubscribed key | Verify the key in the Clarivate developer dashboard. Check your subscription covers the Starter API. |
-| `429 rate-limited` | Exceeding Starter API quotas | The toolkit sleeps 30 s and retries once. If your quota is exhausted, wait for the daily window to reset. |
-| `WOS files have no DOI column` warning in Merge | TXT exports were created without the "Full Record" option, or were saved in a non-standard encoding | Re-export from WoS with the `Full Record and Cited References` option selected. The loader handles utf-8-sig, utf-16, utf-8 and latin-1. |
+**This toolkit only uses legitimate Open Access sources for full-text
+acquisition.** Sci-Hub and paywall circumvention are intentionally NOT
+supported.
 
----
+- Unpaywall, Crossref, OpenAlex, and arXiv are all standard, ToS-compliant
+  research APIs.
+- Crossref `link` URLs flagged as `text-mining` are explicitly opened by
+  publishers for TDM (Text and Data Mining) use.
+- If your institution has Elsevier / Wiley / Springer TDM agreements,
+  those endpoints can be added to Stage 4 by extending `acquire_one_pdf()`
+  — but coordinate with your library first.
 
-## 9. Known Limitations
+The WoS browser fallback in Stage 2 walks the same Web of Science search
+UI you would use manually. It is sensitive to Clarivate's terms of use;
+prefer the API path whenever you have access.
 
-**Without a Web of Science API key, only Stage 1 runs locally.**
+For the LLM extraction stage:
 
-- Stage 1 (PDF reference extraction + Crossref enrichment) is fully
-  functional and requires no Clarivate access. It is the only stage you
-  can run end-to-end on a personal machine with no institutional API
-  subscription.
-- Stage 2 needs either a WoS Starter API key or the browser fallback.
-  The browser fallback:
-    - is ToS-sensitive (Clarivate's terms of use disallow automated
-      scraping in general; even with a persistent SSO session your
-      institution may flag the behaviour or rate-limit you);
-    - **requires the machine to remain powered on, logged in, and
-      connected to the network for the entire run**, which can take
-      tens of minutes to several hours depending on batch count and
-      delay settings. This is incompatible with a single-laptop
-      mobile-work setup.
-- Stage 3 runs locally and only needs Stage 1's outputs plus whatever
-  WoS exports are available.
-
-**Other current limitations**
-
-- Reference splitting is a heuristic based on author-comma-initial
-  patterns. PDFs with reference lists in non-standard formats (e.g.
-  numbered bracketed citations) may need a custom splitter.
-- The Starter API row mapping fills the major fields (UID, title,
-  source, year, DOI, authors, document type, WoS citation count) but
-  leaves the rest of the WoS schema empty.
-- Crossref bibliographic search has a real false-positive rate on very
-  short or generic citations. The DOI score is recorded so downstream
-  filtering by `Crossref Score` is possible.
-- Browser automation is single-tab and single-window; concurrent runs
-  on the same machine will interfere with each other.
+- Cite the model used in any publication produced from this pipeline.
+- Each finding's `evidence_quote` is intentional and required —
+  un-grounded LLM "summaries" are not reproducible research and should
+  not enter the literature.
+- Spot-audit a random subsample of extractions before drawing
+  conclusions at scale.
 
 ---
 
-## 10. Roadmap
+## 10. Known Limitations
 
-Planned improvements, in rough priority order:
+**Without a Web of Science API key**, Stage 1 still runs entirely
+locally and produces a usable references database; Stage 2's browser
+fallback works but is ToS-sensitive and requires the machine to stay
+powered on for the duration of the run.
 
-1. **WoS Expanded API support**: optional toggle that uses the Expanded
-   endpoint to fill the full schema (Cited References, funding,
-   addresses).
-2. **Persistent configuration file** (e.g. `~/.ipcc_refs_toolkit.yaml`)
-   for API keys, default output paths, and last-used settings.
-3. **Resume-from-checkpoint** for Stage 1: re-running a partial PDF
-   should reuse already-extracted chapter data.
-4. **OCR pre-pass** integration so scanned IPCC supplementary documents
-   can be processed in one click.
-5. **Optional Scopus / OpenAlex enrichment** in Stage 2 for citations
-   that Crossref cannot match but other indexes can.
-6. **Unit and integration test suite** with sample mini-PDFs and
-   fixture WoS exports.
-7. **Headless mode / CLI entry points** for batch processing on a
-   server.
+**Stage 4 OA coverage is fundamentally limited** by the openness of the
+underlying literature: expect roughly 40–60% download success for
+climate/environment IPCC references, lower for older or theoretical
+papers. The `pdf_index.csv` makes the gap explicit so it can be
+reported honestly as a limitation in derivative work.
+
+**MarkItDown quality on scientific PDFs is uneven.** Double-column
+layouts, math, complex tables, and scanned pages are hard. The
+`markdown_index.csv` records which converter was used so you can audit
+quality post-hoc. For known-bad PDFs, run `ocrmypdf` first.
+
+**LLM extraction has a real false-positive rate.** The schema requires
+verbatim evidence quotes specifically to make these errors detectable —
+but you must actually audit a sample (we suggest 5–10% of the corpus)
+before publishing aggregate results.
+
+**Cost.** Sonnet 4.6 on 10,000 papers at ≈40k input tokens each will
+typically cost in the four-figures USD range. Always test on
+`--max-papers 20` first.
+
+**Reference splitter heuristic** (Stage 1) assumes author-comma-initial
+citation style. PDFs with numbered bracketed citations or other
+unusual styles may need a custom splitter.
 
 ---
 
-## 11. Author and License
+## 11. Roadmap
+
+1. **WoS Expanded API support** for full schema (Cited References, funding,
+   addresses) in Stage 2.
+2. **Persistent config file** (`~/.ipcc_refs_toolkit.yaml`) for API keys
+   and default paths.
+3. **GUI tabs for Stages 4–7**, so the toolkit becomes single-window
+   end-to-end.
+4. **Scopus / OpenAlex enrichment** in Stage 2 as an alternative to WoS.
+5. **OCR pre-pass** integration for scanned PDFs.
+6. **Cross-document analyses** (citation networks, topic clustering,
+   temporal trend tests) in Stage 7.
+7. **Sample audit tooling** to make Stage 6 auditing systematic rather
+   than ad-hoc.
+8. **Unit and integration test suite** with sample mini-PDFs.
+
+---
+
+## 12. Author and License
 
 **Author:** Jiacheng Zheng
-
 **Contact / homepage:** <https://karcen.github.io/zhengjiacheng.github.io/>
 
-This tool was built to support IPCC-related bibliometric research.
-Contributions, bug reports, and feedback are welcome — please reach out
-via the homepage above.
+Built to support IPCC-related bibliometric research. Bug reports,
+pull requests, and feedback are welcome via the homepage above.
 
 No license file is bundled; treat the code as research software for
-academic use. If you wish to redistribute or reuse it in another
-project, please contact the author first.
+academic use. If you wish to redistribute or reuse it in a commercial
+or large-scale project, please contact the author first.
