@@ -474,6 +474,7 @@ unusual styles may need a custom splitter.
 ## 12. Author and License
 
 **Author:** Jiacheng Zheng
+
 **Contact / homepage:** <https://karcen.github.io/zhengjiacheng.github.io/>
 
 Built to support IPCC-related bibliometric research. Bug reports,
